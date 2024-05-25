@@ -1,11 +1,13 @@
 require("@nomiclabs/hardhat-waffle");
+require("@openzeppelin/hardhat-upgrades");
+require("@nomiclabs/hardhat-ethers");
 
 module.exports = {
-  solidity: "0.8.0",
+  solidity: "0.8.4",
   networks: {
-    mainnet: {
-      url: `https://mainnet.infura.io/v3/YOUR_INFURA_PROJECT_ID`,
-      accounts: [`0x${YOUR_MAINNET_PRIVATE_KEY}`]
+    testnet: {
+      url: `https://sepolia.infura.io/v3/5982800e8b2940c689c2b7335f104c61`,
+      accounts: [`0x6596c4628d692bf04df6f9de254090db6d7f80f80ea55bd5f167f13d844e7f04`]
     }
   }
 };
