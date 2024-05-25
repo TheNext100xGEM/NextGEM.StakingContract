@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface ISubscription {
     function checkManyRoles(address account, bytes32[] memory rolesToCheck) external view returns (bool);
@@ -13,13 +13,13 @@ interface ISubscription {
 }
 
 contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable {
-    using SafeERC20Upgradeable for IERC20Upgradeable;
-    using SafeMath for uint256;
+    using SafeERC20 for IERC20;
+    using Math for uint256;
 
     bytes32 public constant STAKE_MANAGER_ROLE = keccak256("STAKE_MANAGER_ROLE");
-    IERC20Upgradeable public stakingToken;
+    IERC20 public stakingToken;
     ISubscription public subscriptionContract;
-    bytes32[] public roles;
+    bytes32[] public roles; 
 
     struct StakingEvent {
         uint256 startBlock;
@@ -49,7 +49,7 @@ contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable
     event Claimed(uint256 indexed eventId, address indexed staker, uint256 stakedAmount, uint256 rewardAmount);
     event RolesUpdated(bytes32[] newRoles);
 
-    function initialize(address subscriptionAddress, IERC20Upgradeable _stakingToken) public initializer {
+    function initialize(address subscriptionAddress, IERC20 _stakingToken) public initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
 
@@ -105,7 +105,7 @@ contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable
         }
 
         Stake storage userStake = stakes[eventId][msg.sender];
-        require(userStake.amount.add(amount) <= stakingEvent.maxPerWallet, "StakingContract: Exceeds max per wallet limit");
+        require(userStake.amount + amount <= stakingEvent.maxPerWallet, "StakingContract: Exceeds max per wallet limit");
 
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
 
@@ -113,13 +113,13 @@ contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable
             eventStakers[eventId].push(msg.sender);
         }
 
-        userStake.amount = userStake.amount.add(amount);
+        userStake.amount = userStake.amount + amount;
         userStake.stakeBlockNumber = block.number;
 
-        uint256 stakeUnits = amount.mul(stakingEvent.endBlock.sub(block.number));
-        userStake.units = userStake.units.add(stakeUnits);
+        uint256 stakeUnits = amount * (stakingEvent.endBlock - block.number);
+        userStake.units = userStake.units+stakeUnits;
 
-        stakingEvent.totalStaked = stakingEvent.totalStaked.add(amount);
+        stakingEvent.totalStaked = stakingEvent.totalStaked+amount;
         emit Staked(eventId, msg.sender, amount, block.number, stakeUnits);
     }
 
@@ -139,7 +139,7 @@ contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable
         userStake.amount = 0;
         userStake.units = 0;
 
-        uint256 totalAmount = stakedAmount.add(rewardAmount);
+        uint256 totalAmount = stakedAmount+rewardAmount;
         stakingToken.safeTransfer(msg.sender, totalAmount);
 
         emit Claimed(eventId, msg.sender, stakedAmount, rewardAmount);
@@ -157,12 +157,12 @@ contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable
 
         uint256 totalUnits = 0;
         for (uint i = 0; i < eventStakers[eventId].length; i++) {
-            totalUnits = totalUnits.add(stakes[eventId][eventStakers[eventId][i]].units);
+            totalUnits = totalUnits+(stakes[eventId][eventStakers[eventId][i]].units);
         }
 
         if (totalUnits == 0) return 0;
 
-        uint256 userShare = userStake.units.mul(stakingEvent.totalGEMAI).div(totalUnits);
+        uint256 userShare = userStake.units*(stakingEvent.totalGEMAI)/totalUnits;
         return userShare;
     }
 
@@ -173,11 +173,11 @@ contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable
      */
     function calculateAPY(uint256 eventId) public view returns (uint256) {
         StakingEvent storage stakingEvent = stakingEvents[eventId];
-        uint256 day = (stakingEvent.endBlock.sub(stakingEvent.startBlock)).div(6500);  
+        uint256 day = (stakingEvent.endBlock-stakingEvent.startBlock)/(6500);  
         if (day == 0) return 99999; // Handle case with zero days
         if (stakingEvent.totalStaked == 0) return 99999; // High APY for no staking
 
-        return stakingEvent.totalGEMAI.mul(365).mul(100).div(stakingEvent.totalStaked.mul(day));
+        return stakingEvent.totalGEMAI*(365)*(100)/(stakingEvent.totalStaked*(day));
     }
 
     /**
@@ -216,7 +216,7 @@ contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable
         if (block.number >= stakingEvents[eventId].endBlock) {
             return 0;
         } else {
-            return stakingEvents[eventId].endBlock.sub(block.number);
+            return stakingEvents[eventId].endBlock-block.number;
         }
     }
 
@@ -228,7 +228,7 @@ contract StakingContract is AccessControlUpgradeable, ReentrancyGuardUpgradeable
      */
     function getRemainingTime(uint256 eventId) public view returns (uint256) {
         uint256 remainingBlocks = getRemainingBlocks(eventId);
-        return remainingBlocks.mul(13); // Assuming an average block time of 13 seconds
+        return remainingBlocks*13; // Assuming an average block time of 13 seconds
     }
 
     /**
