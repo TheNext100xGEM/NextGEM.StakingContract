@@ -21,11 +21,14 @@ contract StakingContract is AccessControl, ReentrancyGuard {
     ISubscription public subscriptionContract;
     bytes32[] public roles; 
 
+    uint256 public averageBlockTime; // Configurable average block time in seconds
+
     struct StakingEvent {
         uint256 startBlock;
         uint256 endBlock;
         uint256 totalGEMAI; // Total reward tokens for the event
         uint256 totalStaked;
+        uint256 totalUnits;
         bool isActive;
         bool requiresRoleCheck;
         uint256 maxPerWallet; // Maximum staking amount per wallet
@@ -39,6 +42,7 @@ contract StakingContract is AccessControl, ReentrancyGuard {
 
     mapping(uint256 => StakingEvent) public stakingEvents;
     mapping(uint256 => mapping(address => Stake)) public stakes;
+    mapping(uint256 => mapping(address => bool)) public hasStaked;
     mapping(uint256 => address[]) public eventStakers;
     uint256 public currentEventId;
 
@@ -48,10 +52,13 @@ contract StakingContract is AccessControl, ReentrancyGuard {
     event Unstaked(uint256 indexed eventId, address indexed staker, uint256 amount);
     event Claimed(uint256 indexed eventId, address indexed staker, uint256 stakedAmount, uint256 rewardAmount);
     event RolesUpdated(bytes32[] newRoles);
+    event AverageBlockTimeUpdated(uint256 newAverageBlockTime);
+    event EmergencyExit(address indexed admin, address indexed to, uint256 amount);
 
-    constructor(address subscriptionAddress, IERC20 _stakingToken) {
+    constructor(address subscriptionAddress, IERC20 _stakingToken, uint256 _averageBlockTime) {
         subscriptionContract = ISubscription(subscriptionAddress);
         stakingToken = _stakingToken;
+        averageBlockTime = _averageBlockTime;
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(STAKE_MANAGER_ROLE, msg.sender);
     }
@@ -66,6 +73,15 @@ contract StakingContract is AccessControl, ReentrancyGuard {
     }
 
     /**
+     * @dev Sets or updates the average block time.
+     * @param _averageBlockTime The new average block time in seconds.
+     */
+    function setAverageBlockTime(uint256 _averageBlockTime) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        averageBlockTime = _averageBlockTime;
+        emit AverageBlockTimeUpdated(_averageBlockTime);
+    }
+
+    /**
      * @dev Creates a new staking event and optionally loads tokens into the contract.
      * @param startBlock The block number when the staking event starts.
      * @param endBlock The block number when the staking event ends.
@@ -76,13 +92,14 @@ contract StakingContract is AccessControl, ReentrancyGuard {
      */
     function createStakingEvent(uint256 startBlock, uint256 endBlock, uint256 totalGEMAI, uint256 amountToLoad, bool requiresRoleCheck, uint256 maxPerWallet) external onlyRole(STAKE_MANAGER_ROLE) {
         require(endBlock > startBlock, "StakingContract: End block must be greater than start block");
-        require(amountToLoad > 0, "StakingContract: Amount to load must be greater than zero");
+        require(totalGEMAI > 0, "StakingContract: Total reward tokens must be greater than zero");
+        require(amountToLoad >= totalGEMAI, "StakingContract: Amount to load must be at least equal to total reward tokens");
         require(maxPerWallet > 0, "StakingContract: Max per wallet must be greater than zero");
 
         stakingToken.safeTransferFrom(msg.sender, address(this), amountToLoad);
 
         currentEventId++;
-        stakingEvents[currentEventId] = StakingEvent(startBlock, endBlock, totalGEMAI, 0, true, requiresRoleCheck, maxPerWallet);
+        stakingEvents[currentEventId] = StakingEvent(startBlock, endBlock, totalGEMAI, 0, 0, true, requiresRoleCheck, maxPerWallet);
         emit StakingEventCreated(currentEventId, startBlock, endBlock, totalGEMAI, requiresRoleCheck, maxPerWallet);
     }
 
@@ -92,6 +109,7 @@ contract StakingContract is AccessControl, ReentrancyGuard {
      * @param amount The amount of tokens to stake.
      */
     function stake(uint256 eventId, uint256 amount) external nonReentrant {
+        require(eventId <= currentEventId, "StakingContract: Staking event does not exist");
         StakingEvent storage stakingEvent = stakingEvents[eventId];
         require(stakingEvent.isActive, "StakingContract: Event not active");
         require(block.number >= stakingEvent.startBlock && block.number <= stakingEvent.endBlock, "StakingContract: Not within staking period");
@@ -106,17 +124,20 @@ contract StakingContract is AccessControl, ReentrancyGuard {
 
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
 
-        if (userStake.amount == 0) {
+        if (!hasStaked[eventId][msg.sender]) {
             eventStakers[eventId].push(msg.sender);
+            hasStaked[eventId][msg.sender] = true;
         }
 
-        userStake.amount = userStake.amount + amount;
+        userStake.amount += amount;
         userStake.stakeBlockNumber = block.number;
 
         uint256 stakeUnits = amount * (stakingEvent.endBlock - block.number);
-        userStake.units = userStake.units + stakeUnits;
+        userStake.units += stakeUnits;
 
-        stakingEvent.totalStaked = stakingEvent.totalStaked + amount;
+        stakingEvent.totalStaked += amount;
+        stakingEvent.totalUnits += stakeUnits;
+
         emit Staked(eventId, msg.sender, amount, block.number, stakeUnits);
     }
 
@@ -125,7 +146,9 @@ contract StakingContract is AccessControl, ReentrancyGuard {
      * @param eventId The ID of the staking event.
      */
     function claim(uint256 eventId) external nonReentrant {
-        require(block.number > stakingEvents[eventId].endBlock, "StakingContract: Staking event not yet ended");
+        require(eventId <= currentEventId, "StakingContract: Staking event does not exist");
+        updateStakingEventStatus(eventId);
+        require(!stakingEvents[eventId].isActive, "StakingContract: Staking event not yet ended");
 
         Stake storage userStake = stakes[eventId][msg.sender];
         uint256 stakedAmount = userStake.amount;
@@ -152,14 +175,9 @@ contract StakingContract is AccessControl, ReentrancyGuard {
         StakingEvent storage stakingEvent = stakingEvents[eventId];
         Stake storage userStake = stakes[eventId][user];
 
-        uint256 totalUnits = 0;
-        for (uint i = 0; i < eventStakers[eventId].length; i++) {
-            totalUnits = totalUnits + (stakes[eventId][eventStakers[eventId][i]].units);
-        }
+        if (stakingEvent.totalUnits == 0) return 0;
 
-        if (totalUnits == 0) return 0;
-
-        uint256 userShare = userStake.units * (stakingEvent.totalGEMAI) / totalUnits;
+        uint256 userShare = userStake.units * (stakingEvent.totalGEMAI) / stakingEvent.totalUnits;
         return userShare;
     }
 
@@ -169,12 +187,13 @@ contract StakingContract is AccessControl, ReentrancyGuard {
      * @return The calculated APY for the staking event.
      */
     function calculateAPY(uint256 eventId) public view returns (uint256) {
+        require(eventId <= currentEventId, "StakingContract: Staking event does not exist");
         StakingEvent storage stakingEvent = stakingEvents[eventId];
-        uint256 day = (stakingEvent.endBlock - stakingEvent.startBlock) / (6500);  
+        uint256 day = (stakingEvent.endBlock - stakingEvent.startBlock) / 6500;
         if (day == 0) return 99999; // Handle case with zero days
         if (stakingEvent.totalStaked == 0) return 99999; // High APY for no staking
 
-        return stakingEvent.totalGEMAI * (365) * (100) / (stakingEvent.totalStaked * (day));
+        return stakingEvent.totalGEMAI * 365 * 100 / (stakingEvent.totalStaked * day);
     }
 
     /**
@@ -219,13 +238,12 @@ contract StakingContract is AccessControl, ReentrancyGuard {
 
     /**
      * @dev Returns the remaining time in seconds until the staking event ends.
-     * Assumes an average block time of 13 seconds.
      * @param eventId The ID of the staking event.
      * @return The number of remaining seconds.
      */
     function getRemainingTime(uint256 eventId) public view returns (uint256) {
         uint256 remainingBlocks = getRemainingBlocks(eventId);
-        return remainingBlocks * 13; // Assuming an average block time of 13 seconds
+        return remainingBlocks * averageBlockTime;
     }
 
     /**
@@ -242,5 +260,25 @@ contract StakingContract is AccessControl, ReentrancyGuard {
      */
     function revokeStakeManager(address _manager) public onlyRole(DEFAULT_ADMIN_ROLE) {
         revokeRole(STAKE_MANAGER_ROLE, _manager);
+    }
+
+    /**
+     * @dev Allows the admin to withdraw all tokens from the contract in case of an emergency.
+     * @param to The address to send the tokens to.
+     */
+    function emergencyExit(address to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        uint256 contractBalance = stakingToken.balanceOf(address(this));
+        stakingToken.safeTransfer(to, contractBalance);
+        emit EmergencyExit(msg.sender, to, contractBalance);
+    }
+
+    /**
+     * @dev Internal function to update the isActive status of a staking event.
+     * @param eventId The ID of the staking event.
+     */
+    function updateStakingEventStatus(uint256 eventId) internal {
+        if (block.number > stakingEvents[eventId].endBlock) {
+            stakingEvents[eventId].isActive = false;
+        }
     }
 }

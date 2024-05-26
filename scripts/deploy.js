@@ -1,5 +1,3 @@
-// scripts/deploy.js
-
 const hre = require("hardhat");
 
 async function main() {
@@ -13,11 +11,12 @@ async function main() {
 
   const StakingContract = await hre.ethers.getContractFactory("StakingContract");
   
-  // Replace these with the actual addresses
-  const subscriptionAddress = "0xYourSubscriptionContractAddress";
-  const stakingTokenAddress = "0xYourStakingTokenAddress";
+  // Replace these with the actual addresses and values
+  const subscriptionAddress = "0x4dcD2a5E68638E0b64766f59C15C02ca11411D98";
+  const stakingTokenAddress = "0xFBE44caE91d7Df8382208fCdc1fE80E40FBc7e9a";
+  const averageBlockTime = 13; // Assuming an average block time of 13 seconds
   
-  const stakingContract = await StakingContract.deploy(subscriptionAddress, stakingTokenAddress);
+  const stakingContract = await StakingContract.deploy(subscriptionAddress, stakingTokenAddress, averageBlockTime);
 
   await stakingContract.deployed();
 
