@@ -1,16 +1,32 @@
+// scripts/deploy.js
+
+const hre = require("hardhat");
+
 async function main() {
-    const { ethers, upgrades } = require("hardhat");
+  // We get the contract to deploy
+  const [deployer] = await hre.ethers.getSigners();
   
-    const StakingContract = await ethers.getContractFactory("StakingContract");
-    console.log("Deploying StakingContract...");
-    const stakingContract = await upgrades.deployProxy(StakingContract, ["0x4232ea0aF92754Ad61c7B75aF9Ed3e2b7E842fFf", "0xef1a07cd949087810d14fb80b53da214ef8f9a3d"], { initializer: "initialize" });
-    await stakingContract.deployed();
-    console.log("StakingContract deployed to:", stakingContract.address);
-  }
+  console.log("Deploying contracts with the account:", deployer.address);
+
+  const balance = await deployer.getBalance();
+  console.log("Account balance:", hre.ethers.utils.formatEther(balance.toString()));
+
+  const StakingContract = await hre.ethers.getContractFactory("StakingContract");
   
-  main()
-    .then(() => process.exit(0))
-    .catch((error) => {
-      console.error(error);
-      process.exit(1);
-    });
+  // Replace these with the actual addresses
+  const subscriptionAddress = "0xYourSubscriptionContractAddress";
+  const stakingTokenAddress = "0xYourStakingTokenAddress";
+  
+  const stakingContract = await StakingContract.deploy(subscriptionAddress, stakingTokenAddress);
+
+  await stakingContract.deployed();
+
+  console.log("StakingContract deployed to:", stakingContract.address);
+}
+
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
