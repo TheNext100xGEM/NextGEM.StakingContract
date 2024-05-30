@@ -7,7 +7,7 @@ module.exports = {
   networks: {
     mainnet: {
       url: `https://sepolia.infura.io/v3/5982800e8b2940c689c2b7335f104c61`,
-      accounts: [``]
+      accounts: [`0x`]
     }
   }
 };

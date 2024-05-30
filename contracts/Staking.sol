@@ -5,16 +5,13 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface ISubscription {
     function checkManyRoles(address account, bytes32[] memory rolesToCheck) external view returns (bool);
-    function listRoles() external view returns (bytes32[] memory);
 }
 
 contract StakingContract is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
-    using Math for uint256;
 
     bytes32 public constant STAKE_MANAGER_ROLE = keccak256("STAKE_MANAGER_ROLE");
     IERC20 public stakingToken;
@@ -42,14 +39,12 @@ contract StakingContract is AccessControl, ReentrancyGuard {
 
     mapping(uint256 => StakingEvent) public stakingEvents;
     mapping(uint256 => mapping(address => Stake)) public stakes;
-    mapping(uint256 => mapping(address => bool)) public hasStaked;
     mapping(uint256 => address[]) public eventStakers;
     uint256 public currentEventId;
 
     // Event declarations
     event StakingEventCreated(uint256 indexed eventId, uint256 startBlock, uint256 endBlock, uint256 totalGEMAI, bool requiresRoleCheck, uint256 maxPerWallet);
     event Staked(uint256 indexed eventId, address indexed staker, uint256 amount, uint256 blockNumber, uint256 units);
-    event Unstaked(uint256 indexed eventId, address indexed staker, uint256 amount);
     event Claimed(uint256 indexed eventId, address indexed staker, uint256 stakedAmount, uint256 rewardAmount);
     event RolesUpdated(bytes32[] newRoles);
     event AverageBlockTimeUpdated(uint256 newAverageBlockTime);
@@ -98,9 +93,9 @@ contract StakingContract is AccessControl, ReentrancyGuard {
 
         stakingToken.safeTransferFrom(msg.sender, address(this), amountToLoad);
 
-        currentEventId++;
-        stakingEvents[currentEventId] = StakingEvent(startBlock, endBlock, totalGEMAI, 0, 0, true, requiresRoleCheck, maxPerWallet);
-        emit StakingEventCreated(currentEventId, startBlock, endBlock, totalGEMAI, requiresRoleCheck, maxPerWallet);
+        uint256 eventId = ++currentEventId;
+        stakingEvents[eventId] = StakingEvent(startBlock, endBlock, totalGEMAI, 0, 0, true, requiresRoleCheck, maxPerWallet);
+        emit StakingEventCreated(eventId, startBlock, endBlock, totalGEMAI, requiresRoleCheck, maxPerWallet);
     }
 
     /**
@@ -120,20 +115,19 @@ contract StakingContract is AccessControl, ReentrancyGuard {
         }
 
         Stake storage userStake = stakes[eventId][msg.sender];
-        require(userStake.amount + amount <= stakingEvent.maxPerWallet, "StakingContract: Exceeds max per wallet limit");
+        uint256 newAmount = userStake.amount + amount;
+        require(newAmount <= stakingEvent.maxPerWallet, "StakingContract: Exceeds max per wallet limit");
 
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
 
-        if (!hasStaked[eventId][msg.sender]) {
+        if (userStake.amount == 0) {
             eventStakers[eventId].push(msg.sender);
-            hasStaked[eventId][msg.sender] = true;
         }
 
-        userStake.amount += amount;
-        userStake.stakeBlockNumber = block.number;
-
         uint256 stakeUnits = amount * (stakingEvent.endBlock - block.number);
+        userStake.amount = newAmount;
         userStake.units += stakeUnits;
+        userStake.stakeBlockNumber = block.number;
 
         stakingEvent.totalStaked += amount;
         stakingEvent.totalUnits += stakeUnits;
@@ -177,20 +171,40 @@ contract StakingContract is AccessControl, ReentrancyGuard {
 
         if (stakingEvent.totalUnits == 0) return 0;
 
-        uint256 userShare = userStake.units * (stakingEvent.totalGEMAI) / stakingEvent.totalUnits;
+        uint256 userShare = userStake.units * stakingEvent.totalGEMAI / stakingEvent.totalUnits;
         return userShare;
     }
 
     /**
-     * @dev Calculates the Annual Percentage Yield (APY) for a staking event.
+     * @dev Calculates the Personal APY for a user in a staking event.
      * @param eventId The ID of the staking event.
-     * @return The calculated APY for the staking event.
+     * @param user The address of the user.
+     * @return The calculated Personal APY for the user.
      */
-    function calculateAPY(uint256 eventId) public view returns (uint256) {
+    function calculatePersonalAPY(uint256 eventId, address user) public view returns (uint256) {
+        require(eventId <= currentEventId, "StakingContract: Staking event does not exist");
+        StakingEvent storage stakingEvent = stakingEvents[eventId];
+        Stake storage userStake = stakes[eventId][user];
+        uint256 day = (stakingEvent.endBlock - stakingEvent.startBlock) / 6500;
+        if (day == 0) day = 1; // Handle case with zero days
+
+        if (userStake.amount == 0) return 99999; // High APY for no staking
+
+        uint256 personalRewardAmount = calculateReward(eventId, user);
+        return personalRewardAmount * 365 * 100 / (userStake.amount * day);
+    }
+
+    /**
+     * @dev Calculates the Global APY for a staking event.
+     * @param eventId The ID of the staking event.
+     * @return The calculated Global APY for the staking event.
+     */
+    function calculateGlobalAPY(uint256 eventId) public view returns (uint256) {
         require(eventId <= currentEventId, "StakingContract: Staking event does not exist");
         StakingEvent storage stakingEvent = stakingEvents[eventId];
         uint256 day = (stakingEvent.endBlock - stakingEvent.startBlock) / 6500;
-        if (day == 0) return 99999; // Handle case with zero days
+        if (day == 0) day = 1; // Handle case with zero days
+
         if (stakingEvent.totalStaked == 0) return 99999; // High APY for no staking
 
         return stakingEvent.totalGEMAI * 365 * 100 / (stakingEvent.totalStaked * day);
@@ -229,11 +243,7 @@ contract StakingContract is AccessControl, ReentrancyGuard {
      * @return The number of remaining blocks.
      */
     function getRemainingBlocks(uint256 eventId) public view returns (uint256) {
-        if (block.number >= stakingEvents[eventId].endBlock) {
-            return 0;
-        } else {
-            return stakingEvents[eventId].endBlock - block.number;
-        }
+        return block.number >= stakingEvents[eventId].endBlock ? 0 : stakingEvents[eventId].endBlock - block.number;
     }
 
     /**
@@ -242,8 +252,7 @@ contract StakingContract is AccessControl, ReentrancyGuard {
      * @return The number of remaining seconds.
      */
     function getRemainingTime(uint256 eventId) public view returns (uint256) {
-        uint256 remainingBlocks = getRemainingBlocks(eventId);
-        return remainingBlocks * averageBlockTime;
+        return getRemainingBlocks(eventId) * averageBlockTime;
     }
 
     /**
